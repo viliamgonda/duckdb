@@ -1117,25 +1117,7 @@ private:
 				}
 			}
 
-			// We can bail on a subplan for various reasons (some of which could potentially be fixed)
-			bool bail = false;
-
-			for (auto &subplan : subplan_info.subplans) {
-				column_binding_set_t subplan_bindings;
-				for (auto &cb : subplan.canonical_bindings) {
-					if (subplan_bindings.find(cb) != subplan_bindings.end()) {
-						bail =
-						    true; // Subplan contains duplicate column bindings, i.e., another nested duplicate subplan
-						break;
-					}
-					subplan_bindings.insert(cb);
-				}
-				if (bail) {
-					break;
-				}
-			}
-
-			if (bail || !SelectPrimarySubplan(subplan_info)) {
+			if (!SelectPrimarySubplan(subplan_info)) {
 				to_remove.push_back(signature);
 				continue;
 			}
@@ -1511,10 +1493,33 @@ private:
 		return result;
 	}
 
+	bool HasUniqueCanonicalTableBindings(const Subplan &subplan) {
+		column_binding_set_t subplan_bindings;
+		for (auto &cb : subplan.canonical_bindings) {
+			if (!subplan_bindings.insert(cb).second) {
+				// Subplan contains duplicate column bindings, i.e., another nested duplicate subplan
+				return false;
+			}
+		}
+		unordered_map<TableIndex, TableIndex> table_sources;
+		for (const auto &binding : GetExpandedColumnBindings(*subplan.op.get())) {
+			const auto canonical_table_index = GetCanonicalBinding(binding).table_index;
+			auto entry = table_sources.emplace(canonical_table_index, binding.table_index);
+			if (!entry.second && entry.first->second != binding.table_index) {
+				// Repeated occurrences of the same canonical input cannot be distinguished by canonical bindings.
+				return false;
+			}
+		}
+		return true;
+	}
+
 	//! Moves a subplan that can expose every binding required by the duplicate occurrences to the front
 	bool SelectPrimarySubplan(SubplanInfo &subplan_info) {
 		column_binding_set_t required_bindings;
 		for (auto &subplan : subplan_info.subplans) {
+			if (!HasUniqueCanonicalTableBindings(subplan)) {
+				return false;
+			}
 			required_bindings.insert(subplan.canonical_bindings.begin(), subplan.canonical_bindings.end());
 		}
 
